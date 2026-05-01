@@ -1,25 +1,63 @@
-// Thin wrapper around the Anthropic SDK. Loads the per-agent system prompt,
-// invokes Claude, and parses the structured JSON response. All agents go
-// through this so retry / error handling / parsing is uniform.
+// Provider-agnostic agent caller. Loads the per-agent system prompt, dispatches
+// to the right SDK based on LLM_PROVIDER, and parses the structured JSON
+// response. All agents go through this so retry / error handling / parsing is
+// uniform regardless of which provider is in use.
+//
+// Anthropic: native @anthropic-ai/sdk against api.anthropic.com.
+// Grok (and any OpenAI-compatible endpoint): the openai SDK pointed at the
+// provider's /v1 base URL — xAI exposes an OpenAI-shaped chat-completions API.
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
-import { MAX_TOKENS, MODEL, PATHS } from '../config.js';
+import {
+  LLM_BASE_URL,
+  LLM_PROVIDER,
+  MAX_TOKENS,
+  MODEL,
+  PATHS,
+  SUPPORTED_PROVIDERS,
+} from '../config.js';
 import { logError } from '../lib/logger.js';
 
-let client = null;
+let anthropicClient = null;
+let openAiClient = null;
 
-function getClient() {
-  if (!client) {
+function getAnthropicClient() {
+  if (!anthropicClient) {
     if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error('ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.');
+      throw new Error(
+        'ANTHROPIC_API_KEY is not set. Either set it, or switch LLM_PROVIDER in .env.'
+      );
     }
-    client = new Anthropic();
+    anthropicClient = new Anthropic();
   }
-  return client;
+  return anthropicClient;
+}
+
+function getOpenAiClient() {
+  if (!openAiClient) {
+    const apiKey = pickOpenAiKey();
+    if (!apiKey) {
+      throw new Error(
+        `No API key found for LLM_PROVIDER=${LLM_PROVIDER}. ` +
+          'Set XAI_API_KEY (Grok) or OPENAI_API_KEY, or switch LLM_PROVIDER in .env.'
+      );
+    }
+    openAiClient = new OpenAI({
+      apiKey,
+      baseURL: LLM_BASE_URL ?? undefined,
+    });
+  }
+  return openAiClient;
+}
+
+function pickOpenAiKey() {
+  if (LLM_PROVIDER === 'grok') return process.env.XAI_API_KEY || process.env.OPENAI_API_KEY;
+  return process.env.OPENAI_API_KEY || process.env.XAI_API_KEY;
 }
 
 const promptCache = new Map();
@@ -33,31 +71,62 @@ async function loadPrompt(promptFile) {
 }
 
 export async function callAgent({ agentName, promptFile, userMessage, extraSystem }) {
+  if (!SUPPORTED_PROVIDERS.includes(LLM_PROVIDER)) {
+    throw new Error(
+      `Unsupported LLM_PROVIDER="${LLM_PROVIDER}". Supported: ${SUPPORTED_PROVIDERS.join(', ')}.`
+    );
+  }
+
   const systemBase = await loadPrompt(promptFile);
   const system = extraSystem
     ? `${systemBase}\n\n# Additional context\n\n${extraSystem}`
     : systemBase;
 
+  const text =
+    LLM_PROVIDER === 'anthropic'
+      ? await callAnthropic({ agentName, system, userMessage })
+      : await callOpenAiCompatible({ agentName, system, userMessage });
+
+  return parseAgentResponse(text, agentName);
+}
+
+async function callAnthropic({ agentName, system, userMessage }) {
   let response;
   try {
-    response = await getClient().messages.create({
+    response = await getAnthropicClient().messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
       system,
       messages: [{ role: 'user', content: userMessage }],
     });
   } catch (err) {
-    logError(`Claude API call failed for agent ${agentName}`, err);
+    logError(`Anthropic API call failed for agent ${agentName}`, err);
     throw err;
   }
-
-  const text = response.content
+  return response.content
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('\n')
     .trim();
+}
 
-  return parseAgentResponse(text, agentName);
+async function callOpenAiCompatible({ agentName, system, userMessage }) {
+  let response;
+  try {
+    response = await getOpenAiClient().chat.completions.create({
+      model: MODEL,
+      max_tokens: MAX_TOKENS,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userMessage },
+      ],
+    });
+  } catch (err) {
+    logError(`${LLM_PROVIDER} API call failed for agent ${agentName}`, err);
+    throw err;
+  }
+  const choice = response?.choices?.[0]?.message?.content;
+  return (typeof choice === 'string' ? choice : '').trim();
 }
 
 export function parseAgentResponse(raw, agentName) {
