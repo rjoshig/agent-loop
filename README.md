@@ -3,8 +3,9 @@
 Multi-agent orchestration for a credit bureau's customer onboarding workflow.
 Three agents — **CSC**, **Compliance**, **Tech** — deliberate over a customer
 spec, enrich it with regulatory and operational considerations, generate the
-Python monitoring code, and QC the result. Built on LangGraph.js + the
-Anthropic SDK.
+Python monitoring code, and QC the result. Built on LangGraph.js, with a
+provider-agnostic LLM layer that supports both Anthropic (Claude) and Grok
+(xAI) via a single `LLM_PROVIDER` env var.
 
 ## Setup
 
@@ -13,8 +14,21 @@ Requires Node.js 20+.
 ```bash
 npm install
 cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY
+# Edit .env: pick LLM_PROVIDER and set the matching API key.
 ```
+
+## LLM provider
+
+`LLM_PROVIDER` in `.env` selects the backend. The agents and nodes are
+provider-agnostic; only `src/agents/base.js` cares which one is in use.
+
+| Provider    | SDK                     | Default model       | Required key        |
+| ----------- | ----------------------- | ------------------- | ------------------- |
+| `anthropic` | `@anthropic-ai/sdk`     | `claude-sonnet-4-5` | `ANTHROPIC_API_KEY` |
+| `grok`      | `openai` (xAI base URL) | `grok-4`            | `XAI_API_KEY`       |
+
+Override the model with `LLM_MODEL`. Override the base URL with `LLM_BASE_URL`
+(useful for self-hosted OpenAI-compatible gateways).
 
 ## Run
 
@@ -84,7 +98,9 @@ See `docs/architecture.md` for the full module map.
 
 ## Troubleshooting
 
-- **`ANTHROPIC_API_KEY is not set`** — copy `.env.example` to `.env` and fill it in.
+- **`ANTHROPIC_API_KEY is not set`** — `LLM_PROVIDER=anthropic` requires this. Set it, or switch to `LLM_PROVIDER=grok` and set `XAI_API_KEY`.
+- **`No API key found for LLM_PROVIDER=grok`** — set `XAI_API_KEY` (get one at <https://console.x.ai>).
+- **`Unsupported LLM_PROVIDER`** — must be `anthropic` or `grok`. Check `.env`.
 - **Loader throws on missing section** — your `REQUIREMENTS/<slug>.md` is missing a required `## Heading`. Compare against `_TEMPLATE.md`.
 - **Agent returned malformed JSON** — a prompt regression. Check `runs/<run-id>/conversation.jsonl`, fix the relevant `src/prompts/*.md`, re-run.
 - **Run halted with `haltReason`** — phase didn't converge within its round cap, or a human rejected at the gate. The reason is printed to console and stored in `final-state.json`.
