@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.local
+
+# Run artifacts: every execution creates a folder under runs/.
+runs/*
+!runs/.gitkeep
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Build output (none expected, but defensive).
+dist/
+build/
